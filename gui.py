@@ -76,6 +76,11 @@ class ReminderApp:
         self.tree.column("description", width=320)
         self.tree.column("due_at", width=150)
         self.tree.column("status", width=110, anchor=tk.CENTER)
+
+        # Цветовое оформление строк по статусу
+        self.tree.tag_configure("Готово", background="#90EE90")  # светло-зелёный
+        self.tree.tag_configure("Просрочено", background="#FFB6C1")  # бледно-красный
+
         self.tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 4))
         self.tree.bind("<Double-1>", self.on_double_click)
 
@@ -126,6 +131,7 @@ class ReminderApp:
                     due_at.strftime(DISPLAY_DATE_FORMAT),
                     reminder["status"],
                 ),
+                tags=(reminder["status"],),
             )
         self.update_status_bar()
 
