@@ -1,26 +1,33 @@
 """SQLite persistence for the reminder application."""
 
 import sqlite3
-from datetime import datetime
+from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional, Sequence
 
 
 DATABASE_PATH = Path(__file__).with_name("reminders.db")
 STATUSES = ("Ожидает", "Готово", "Просрочено", "Отменено")
+DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 class ReminderDatabase:
     def __init__(self, path: Path = DATABASE_PATH) -> None:
         self.path = Path(path)
-        self.initialize()
+        self.initdatabase()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path, timeout=10)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
-    def initialize(self) -> None:
+    def initdatabase(self) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
@@ -31,23 +38,51 @@ class ReminderDatabase:
                     due_at TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'Ожидает'
                         CHECK (status IN ('Ожидает', 'Готово', 'Просрочено', 'Отменено')),
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     notified INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(reminders)")
+            }
+            if "created_at" not in columns:
+                connection.execute(
+                    "ALTER TABLE reminders ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"
+                )
+                connection.execute(
+                    """
+                    UPDATE reminders SET created_at = CURRENT_TIMESTAMP
+                    WHERE created_at = ''
+                    """
+                )
+            if "notified" not in columns:
+                connection.execute(
+                    "ALTER TABLE reminders ADD COLUMN notified INTEGER NOT NULL DEFAULT 0"
+                )
 
-    def add(self, title: str, description: str, due_at: datetime) -> int:
+    def add_reminder(
+        self, title: str, description: str, due_at: datetime
+    ) -> int:
         with self._connect() as connection:
             cursor = connection.execute(
                 """
-                INSERT INTO reminders (title, description, due_at)
-                VALUES (?, ?, ?)
+                INSERT INTO reminders (title, description, due_at, created_at)
+                VALUES (?, ?, ?, ?)
                 """,
-                (title, description, due_at.strftime("%Y-%m-%d %H:%M:%S")),
+                (
+                    title,
+                    description,
+                    due_at.strftime(DATETIME_FORMAT),
+                    datetime.now().strftime(DATETIME_FORMAT),
+                ),
             )
             return int(cursor.lastrowid)
 
-    def list_reminders(self, status: Optional[str] = None) -> list[sqlite3.Row]:
+    def get_all_reminders(
+        self, status: Optional[str] = None
+    ) -> list[sqlite3.Row]:
         with self._connect() as connection:
             if status is None or status == "Все":
                 rows = connection.execute(
@@ -62,11 +97,26 @@ class ReminderDatabase:
                 ).fetchall()
             return rows
 
-    def delete(self, reminder_id: int) -> None:
+    def get_due_reminders(self, now: Optional[datetime] = None) -> list[sqlite3.Row]:
+        now_text = (now or datetime.now()).strftime(DATETIME_FORMAT)
         with self._connect() as connection:
-            connection.execute("DELETE FROM reminders WHERE id = ?", (reminder_id,))
+            return connection.execute(
+                """
+                SELECT * FROM reminders
+                WHERE due_at <= ? AND notified = 0
+                    AND status IN ('Ожидает', 'Просрочено')
+                ORDER BY due_at, id
+                """,
+                (now_text,),
+            ).fetchall()
 
-    def set_status(self, reminder_id: int, status: str) -> None:
+    def sort_by_due_time(
+        self, reminders: Optional[Sequence[sqlite3.Row]] = None
+    ) -> list[sqlite3.Row]:
+        rows = list(reminders) if reminders is not None else self.get_all_reminders()
+        return sorted(rows, key=lambda reminder: (reminder["due_at"], reminder["id"]))
+
+    def update_status(self, reminder_id: int, status: str) -> None:
         if status not in STATUSES:
             raise ValueError(f"Неизвестный статус: {status}")
         with self._connect() as connection:
@@ -75,22 +125,42 @@ class ReminderDatabase:
                 (status, reminder_id),
             )
 
-    def claim_due_notifications(self, now: datetime) -> list[sqlite3.Row]:
-        """Mark overdue reminders and atomically claim each due notification once."""
-        now_text = now.strftime("%Y-%m-%d %H:%M:%S")
+    def delete_reminder(self, reminder_id: int) -> None:
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
+            connection.execute("DELETE FROM reminders WHERE id = ?", (reminder_id,))
+
+    def mark_overdue(self, now: Optional[datetime] = None) -> int:
+        cutoff = (now or datetime.now()) - timedelta(minutes=1)
+        with self._connect() as connection:
+            cursor = connection.execute(
                 """
                 UPDATE reminders
                 SET status = 'Просрочено'
                 WHERE status = 'Ожидает' AND due_at < ?
                 """,
-                (now_text,),
+                (cutoff.strftime(DATETIME_FORMAT),),
             )
+            return cursor.rowcount
+
+    def get_reminder_by_id(self, reminder_id: int) -> Optional[sqlite3.Row]:
+        with self._connect() as connection:
+            return connection.execute(
+                "SELECT * FROM reminders WHERE id = ?", (reminder_id,)
+            ).fetchone()
+
+    def get_reminders_count(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute("SELECT COUNT(*) FROM reminders").fetchone()
+            return int(row[0])
+
+    def claim_due_notifications(self, now: datetime) -> list[sqlite3.Row]:
+        """Atomically claim each due notification once."""
+        now_text = now.strftime(DATETIME_FORMAT)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 """
-                SELECT id, title, description, due_at
+                SELECT id, title, description, due_at, status
                 FROM reminders
                 WHERE due_at <= ? AND notified = 0
                     AND status IN ('Ожидает', 'Просрочено')
@@ -105,13 +175,18 @@ class ReminderDatabase:
                 )
             return rows
 
-    def mark_overdue(self, now: datetime) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                UPDATE reminders
-                SET status = 'Просрочено'
-                WHERE status = 'Ожидает' AND due_at < ?
-                """,
-                (now.strftime("%Y-%m-%d %H:%M:%S"),),
-            )
+    # Compatibility with the original API used by existing callers.
+    def initialize(self) -> None:
+        self.initdatabase()
+
+    def add(self, title: str, description: str, due_at: datetime) -> int:
+        return self.add_reminder(title, description, due_at)
+
+    def list_reminders(self, status: Optional[str] = None) -> list[sqlite3.Row]:
+        return self.get_all_reminders(status)
+
+    def delete(self, reminder_id: int) -> None:
+        self.delete_reminder(reminder_id)
+
+    def set_status(self, reminder_id: int, status: str) -> None:
+        self.update_status(reminder_id, status)

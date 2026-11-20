@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -22,9 +23,54 @@ class ReminderDatabaseTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in claimed], [reminder_id])
         self.assertEqual(self.database.claim_due_notifications(due_at), [])
 
-        self.database.mark_overdue(due_at + timedelta(seconds=1))
+        self.database.mark_overdue(due_at + timedelta(seconds=60))
+        self.assertEqual(len(self.database.list_reminders("Просрочено")), 0)
+        self.database.mark_overdue(due_at + timedelta(seconds=61))
         reminders = self.database.list_reminders("Просрочено")
         self.assertEqual([row["id"] for row in reminders], [reminder_id])
+        self.assertTrue(reminders[0]["created_at"])
+
+    def test_due_query_and_sort_order(self) -> None:
+        later = self.database.add(
+            "Позже", "", datetime(2026, 11, 20, 14, 5)
+        )
+        earlier = self.database.add(
+            "Раньше", "", datetime(2026, 11, 20, 14, 0)
+        )
+
+        due = self.database.get_due_reminders(datetime(2026, 11, 20, 14, 0))
+        self.assertEqual([row["id"] for row in due], [earlier])
+        all_reminders = self.database.sort_by_due_time(
+            self.database.get_all_reminders()
+        )
+        self.assertEqual([row["id"] for row in all_reminders], [earlier, later])
+        self.assertEqual(self.database.get_reminders_count(), 2)
+
+    def test_existing_database_gets_creation_timestamp_column(self) -> None:
+        path = Path(self.temp_dir.name) / "existing.db"
+        with sqlite3.connect(path) as connection:
+            connection.execute(
+                """
+                CREATE TABLE reminders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    due_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'Ожидает',
+                    notified INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO reminders (title, due_at)
+                VALUES ('Старое напоминание', '2026-11-20 14:00:00')
+                """
+            )
+
+        migrated = ReminderDatabase(path).get_reminder_by_id(1)
+        self.assertIsNotNone(migrated)
+        self.assertTrue(migrated["created_at"])
 
     def test_terminal_status_is_not_changed_or_notified(self) -> None:
         due_at = datetime(2026, 11, 20, 14, 0)
