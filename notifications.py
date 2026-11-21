@@ -48,7 +48,9 @@ class NotificationManager:
                     self.notifications.put(("refresh", None))
                 for reminder in self.database.claim_due_notifications(datetime.now()):
                     self.notifications.put(("reminder", reminder))
-            except sqlite3.Error as error:
+                    if reminder["is_recurring"]:
+                        self.database.create_next_occurrence(reminder["id"])
+            except Exception as error:
                 self.notifications.put(("error", error))
             self.stop_event.wait(1)
 

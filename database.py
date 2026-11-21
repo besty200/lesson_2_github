@@ -61,24 +61,57 @@ class ReminderDatabase:
                 connection.execute(
                     "ALTER TABLE reminders ADD COLUMN notified INTEGER NOT NULL DEFAULT 0"
                 )
+            if "is_recurring" not in columns:
+                connection.execute(
+                    "ALTER TABLE reminders ADD COLUMN is_recurring INTEGER NOT NULL DEFAULT 0"
+                )
+            if "recurrence_interval_minutes" not in columns:
+                connection.execute(
+                    "ALTER TABLE reminders ADD COLUMN recurrence_interval_minutes INTEGER"
+                )
 
     def add_reminder(
-        self, title: str, description: str, due_at: datetime
+        self,
+        title: str,
+        description: str,
+        due_at: datetime,
+        is_recurring: bool = False,
+        recurrence_interval_minutes: Optional[int] = None,
     ) -> int:
         with self._connect() as connection:
             cursor = connection.execute(
                 """
-                INSERT INTO reminders (title, description, due_at, created_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO reminders (title, description, due_at, created_at, is_recurring, recurrence_interval_minutes)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     title,
                     description,
                     due_at.strftime(DATETIME_FORMAT),
                     datetime.now().strftime(DATETIME_FORMAT),
+                    1 if is_recurring else 0,
+                    recurrence_interval_minutes,
                 ),
             )
             return int(cursor.lastrowid)
+
+    def create_next_occurrence(self, reminder_id: int) -> Optional[int]:
+        """Создать следующее вхождение периодического напоминания."""
+        reminder = self.get_reminder_by_id(reminder_id)
+        if reminder is None or not reminder["is_recurring"]:
+            return None
+        interval = reminder["recurrence_interval_minutes"]
+        if interval is None or interval <= 0:
+            return None
+        due_at = datetime.strptime(reminder["due_at"], DATETIME_FORMAT)
+        next_due = due_at + timedelta(minutes=interval)
+        return self.add_reminder(
+            str(reminder["title"]),
+            str(reminder["description"] or ""),
+            next_due,
+            is_recurring=True,
+            recurrence_interval_minutes=interval,
+        )
 
     def get_all_reminders(
         self, status: Optional[str] = None
@@ -160,7 +193,8 @@ class ReminderDatabase:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 """
-                SELECT id, title, description, due_at, status
+                SELECT id, title, description, due_at, status,
+                       is_recurring, recurrence_interval_minutes
                 FROM reminders
                 WHERE due_at <= ? AND notified = 0
                     AND status IN ('Ожидает', 'Просрочено')
@@ -179,8 +213,21 @@ class ReminderDatabase:
     def initialize(self) -> None:
         self.initdatabase()
 
-    def add(self, title: str, description: str, due_at: datetime) -> int:
-        return self.add_reminder(title, description, due_at)
+    def add(
+        self,
+        title: str,
+        description: str,
+        due_at: datetime,
+        is_recurring: bool = False,
+        recurrence_interval_minutes: Optional[int] = None,
+    ) -> int:
+        return self.add_reminder(
+            title,
+            description,
+            due_at,
+            is_recurring=is_recurring,
+            recurrence_interval_minutes=recurrence_interval_minutes,
+        )
 
     def list_reminders(self, status: Optional[str] = None) -> list[sqlite3.Row]:
         return self.get_all_reminders(status)

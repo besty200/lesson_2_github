@@ -4,6 +4,7 @@ import sqlite3
 import tkinter as tk
 from datetime import datetime, timedelta
 from tkinter import messagebox, ttk
+from typing import Optional
 
 from database import DATETIME_FORMAT, STATUSES, ReminderDatabase
 from notifications import NotificationManager
@@ -109,9 +110,20 @@ class ReminderApp:
             self.due_var.set(due_at.strftime(DISPLAY_DATE_FORMAT))
 
     def add_reminder(
-        self, title: str, description: str, due_at: datetime
+        self,
+        title: str,
+        description: str,
+        due_at: datetime,
+        is_recurring: bool = False,
+        recurrence_interval_minutes: Optional[int] = None,
     ) -> int:
-        reminder_id = self.database.add_reminder(title, description, due_at)
+        reminder_id = self.database.add_reminder(
+            title,
+            description,
+            due_at,
+            is_recurring=is_recurring,
+            recurrence_interval_minutes=recurrence_interval_minutes,
+        )
         self.refresh_reminders()
         return reminder_id
 
@@ -184,6 +196,9 @@ class ReminderApp:
 
         title_var = tk.StringVar()
         self.due_var = tk.StringVar(value=datetime.now().strftime(DISPLAY_DATE_FORMAT))
+        self.recurring_var = tk.BooleanVar(value=False)
+        self.interval_var = tk.IntVar(value=60)
+
         ttk.Label(dialog, text="Заголовок:").grid(
             row=0, column=0, sticky=tk.W, padx=10, pady=(10, 4)
         )
@@ -202,16 +217,41 @@ class ReminderApp:
         ttk.Entry(dialog, textvariable=self.due_var, width=48).grid(
             row=2, column=1, padx=10, pady=4
         )
+
+        ttk.Checkbutton(
+            dialog,
+            text="Периодический",
+            variable=self.recurring_var,
+            command=self._toggle_recurring_fields,
+        ).grid(row=3, column=0, columnspan=2, sticky=tk.W, padx=10, pady=4)
+
         quick_times = ttk.Frame(dialog)
-        quick_times.grid(row=3, column=1, sticky=tk.W, padx=10, pady=4)
+        quick_times.grid(row=4, column=1, sticky=tk.W, padx=10, pady=4)
         for minutes in (1, 5, 15):
             ttk.Button(
                 quick_times,
                 text=f"+{minutes} мин",
                 command=lambda value=minutes: self.set_quick_time(value),
             ).pack(side=tk.LEFT, padx=(0, 5))
+
+        self.recurring_frame = ttk.Frame(dialog)
+        self.recurring_frame.grid(
+            row=5, column=0, columnspan=2, sticky=tk.W, padx=10, pady=4
+        )
+        ttk.Label(
+            self.recurring_frame, text="Интервал повторения (мин):"
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Spinbox(
+            self.recurring_frame,
+            from_=1,
+            to=10080,
+            textvariable=self.interval_var,
+            width=10,
+        ).pack(side=tk.LEFT)
+        self.recurring_frame.grid_remove()
+
         ttk.Label(dialog, text="Формат: ГГГГ-ММ-ДД ЧЧ:ММ").grid(
-            row=4, column=1, sticky=tk.W, padx=10
+            row=6, column=1, sticky=tk.W, padx=10
         )
 
         def save() -> None:
@@ -231,21 +271,33 @@ class ReminderApp:
                 )
                 return
             description = description_text.get("1.0", tk.END).strip()
-            self.add_reminder(title, description, due_at)
-            self.due_var = None
+            is_recurring = self.recurring_var.get()
+            interval_minutes = self.interval_var.get() if is_recurring else None
+            self.add_reminder(
+                title,
+                description,
+                due_at,
+                is_recurring=is_recurring,
+                recurrence_interval_minutes=interval_minutes,
+            )
             dialog.destroy()
 
         def cancel() -> None:
-            self.due_var = None
             dialog.destroy()
 
         buttons = ttk.Frame(dialog)
-        buttons.grid(row=5, column=0, columnspan=2, sticky=tk.E, padx=10, pady=10)
+        buttons.grid(row=7, column=0, columnspan=2, sticky=tk.E, padx=10, pady=10)
         ttk.Button(buttons, text="Сохранить", command=save).pack(
             side=tk.LEFT, padx=4
         )
         ttk.Button(buttons, text="Отмена", command=cancel).pack(side=tk.LEFT)
         title_entry.focus_set()
+
+    def _toggle_recurring_fields(self) -> None:
+        if self.recurring_var.get():
+            self.recurring_frame.grid()
+        else:
+            self.recurring_frame.grid_remove()
 
     def on_closing(self) -> None:
         if messagebox.askyesno("Выход", "Вы уверены, что хотите выйти?"):
